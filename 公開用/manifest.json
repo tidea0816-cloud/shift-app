@@ -1,0 +1,12 @@
+{
+  "name": "シフト作成",
+  "short_name": "シフト",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f6f5f1",
+  "theme_color": "#3d6b5e",
+  "lang": "ja",
+  "icons": []
+}
