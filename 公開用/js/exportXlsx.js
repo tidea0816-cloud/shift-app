@@ -12,7 +12,7 @@ const clone = (o) => JSON.parse(JSON.stringify(o));
 const setFill = (c, fill) => { c.style = { ...clone(c.style), fill: clone(fill) }; };
 const isMasterOrPlain = (c) => !(c.isMerged && c.master !== c);
 
-export async function buildXlsx({ month, members, schedule, templateUrl = 'template.xlsx', mustDays = {} }) {
+export async function buildXlsx({ month, members, schedule, templateUrl = 'template.xlsx', mustDays = {}, events = {}, help = {} }) {
   const res = await fetch(templateUrl);
   if (!res.ok) throw new Error('template.xlsx を読み込めません: ' + res.status);
   const wb = new globalThis.ExcelJS.Workbook();
@@ -31,14 +31,15 @@ export async function buildXlsx({ month, members, schedule, templateUrl = 'templ
     if (n && ws.getCell(r, 3).value != null) tplC[n] = ws.getCell(r, 3).value;
   }
 
+  for (const r of ['V10:V12', 'H14:H15', 'N14:N15']) { try { ws.unMergeCells(r); } catch { } }
+
   // 日付列の全クリア（日付・予算・イベント・社員・バイト）
   const clearRows = [8, 10, 11, 12, 13, 14, 15, 16, 17, ...STAFF_ROWS, ...PART_ROWS.flatMap((r) => [r, r + 1])];
   for (let d = 1; d <= MAX_DAYS; d++) {
     for (const r of [6, 7, ...clearRows]) {
       const c = ws.getCell(r, col(d));
       if (isMasterOrPlain(c)) c.value = null;
-      if (r > 8 && r < 18) continue;
-      if (r >= 20) setFill(c, NOFILL);
+      if (r >= 10) setFill(c, NOFILL);
     }
     if (d > days) {
       for (const r of [6, 7]) setFill(ws.getCell(r, col(d)), NOFILL);
@@ -53,6 +54,31 @@ export async function buildXlsx({ month, members, schedule, templateUrl = 'templ
     ws.getCell(7, col(d)).value = DOW[month.dow[d]];
     for (const r of [6, 7]) setFill(ws.getCell(r, col(d)), pink ? solid(C.pink) : NOFILL);
   }
+
+  // イベント（10〜13行）・社員予定（14〜17行）：1日1セル（縦4行を結合）、縦書き
+  const evText = (d, kind) => [...new Set((events[d] || []).filter((e) => e.kind === kind).map((e) => String(e.text || '').trim()).filter(Boolean))].join('・');
+  const putVertical = (r1, r2, d, text) => {
+    if (!text) return;
+    ws.mergeCells(r1, col(d), r2, col(d));
+    const c = ws.getCell(r1, col(d));
+    c.value = text;
+    c.style = { ...clone(c.style), alignment: { horizontal: 'center', vertical: 'top', wrapText: true, textRotation: 'vertical' }, font: { ...clone(c.style.font || {}), size: 9 } };
+  };
+  for (let d = 1; d <= days; d++) { putVertical(10, 13, d, evText(d, 'store')); putVertical(14, 17, d, evText(d, 'staff')); }
+
+  // 応援候補（ヘルプ行の下の名前欄＝39行）
+  const fam = (n) => String(n).split(/\s+/)[0];
+  let anyHelp = false;
+  for (let d = 1; d <= days; d++) {
+    const names = [...new Set((help[d] || []).map((h) => fam(h.name)))];
+    const c = ws.getCell(39, col(d));
+    c.value = names.length ? '候補:' + names.join('/') : null;
+    if (names.length) {
+      anyHelp = true;
+      c.style = { ...clone(c.style), alignment: { horizontal: 'center', vertical: 'top', wrapText: true, textRotation: 'vertical' }, font: { ...clone(c.style.font || {}), size: 8 } };
+    }
+  }
+  if (anyHelp) ws.getRow(39).height = Math.max(40, Math.min(110, 12 * Math.max(...Object.values(help).map((a) => ('候補:' + a.map((h) => fam(h.name)).join('/')).length))));
 
   // 社員
   const needExtraRow = staff.length > 4;
@@ -105,6 +131,8 @@ export async function buildXlsx({ month, members, schedule, templateUrl = 'templ
     const L = colName(col(d));
     ws.getCell(26, col(d)).value = {
       formula: `COUNTIF(${L}20:${L}${sEnd},"A*")+COUNTIF(${L}20:${L}${sEnd},"B*")+COUNTIF(${L}20:${L}${sEnd},"D*")+0.5*(${PART_ROWS.map((r) => `COUNT(${L}${r})`).join('+')})`,
+      result: Object.values(schedule.staff || {}).filter((o) => /^[ABD]/.test(o[d] || '')).length
+        + 0.5 * Object.values(schedule.part || {}).filter((o) => o[d]).length,
     };
   }
   ws.addConditionalFormatting({

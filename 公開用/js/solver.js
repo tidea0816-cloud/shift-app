@@ -6,6 +6,20 @@ const codeOf = (s) => {
 };
 const isWork = (s) => !!s && 'ADB'.includes(s[0]);
 const HELP_MAX = 3;
+const BUSY_RE = /セール|フェア|祭|初売|福袋|催事|イベント/;
+const helpMax = (m) => m.maxPerMonth ?? HELP_MAX;
+const isBusy = (input, d) => (input.events?.[d] || []).some((e) => e.busy ?? BUSY_RE.test(e.text || ''));
+
+function targets(input) {
+  const N = input.month.days, we = input.month.weekendOrHoliday, TG = new Float64Array(N + 2);
+  for (let d = 1; d <= N; d++) {
+    let a = d, b = d;
+    while (a > 1 && we.has(a - 1)) a--;
+    while (b < N && we.has(b + 1)) b++;
+    TG[d] = (!we.has(d) ? 3 : (b - a + 1 >= 3 && d !== b ? 5 : 4)) + (isBusy(input, d) ? 1 : 0);
+  }
+  return TG;
+}
 
 function partTimes(r) {
   if (!r) return null;
@@ -39,15 +53,10 @@ export function solveSync(input, onProgress, opts = {}) {
   const pt = new Float64Array(N + 2), opener = new Uint8Array(N + 2);
   for (const id in part) for (const d in part[id]) {
     pt[d] += 0.5;
-    if (part[id][d][0] <= 10) opener[d] = 1;
+    if (part[id][d][0] <= 10 && part[id][d][1] >= 13) opener[d] = 1;
   }
-  const TG = new Float64Array(N + 2);
-  for (let d = 1; d <= N; d++) {
-    let a = d, b = d;
-    while (a > 1 && we[a - 1]) a--;
-    while (b < N && we[b + 1]) b++;
-    TG[d] = !we[d] ? 3 : (b - a + 1 >= 3 && d !== b ? 5 : 4);
-  }
+  const TG = targets(input), bz = new Uint8Array(N + 2);
+  for (let d = 1; d <= N; d++) bz[d] = isBusy(input, d) ? 1 : 0;
   const R = [], fixedMask = [], fixedStr = [], must = [], prevRun = [], prevLast = [], tgt = [], isRoleA = [], isHelp = [], freeDays = [], allowHelp = new Uint8Array(N + 2);
   const ev = input.staffEvents || {};
   for (const m of staff) for (const d in (ev[m.id] || {})) if (m.role !== 'help' && 'リ×有'.includes(ev[m.id][d])) allowHelp[d] = 1;
@@ -73,9 +82,10 @@ export function solveSync(input, onProgress, opts = {}) {
     for (let d = 1; d <= N; d++) if (!fx[d]) fd.push(d);
     const work = Math.max(0, N - 8 - fixedOther);
     let ta, td, tb;
-    if (m.role === 'A') { ta = Math.round(work * 0.75); td = Math.round(work * 0.15); }
-    else if (m.role === 'B') { ta = 2; td = Math.round(work * 0.3); }
-    else { ta = Math.round(work * 0.15); td = Math.round(work * 0.25); }
+    const cov = fd.reduce((k, d) => k + opener[d], 0), rate = 1 - cov / Math.max(1, fd.length);
+    if (m.role === 'A') { ta = Math.max(0, Math.round(work * 0.75) - cov); td = Math.round(work * 0.15); }
+    else if (m.role === 'B') { ta = Math.round(2 * rate); td = Math.round(work * 0.3); }
+    else { ta = Math.round(work * 0.15 * rate); td = Math.round(work * 0.25); }
     tb = Math.max(0, work - ta - td);
     const pv = input.prev?.[m.id] || { run: 0, last: '/' };
     R.push(row); fixedMask.push(fx); fixedStr.push(fs); must.push(mu);
@@ -89,7 +99,7 @@ export function solveSync(input, onProgress, opts = {}) {
       if (isHelp[i]) {
         let nb = 0;
         for (let d = 1; d <= N; d++) if (row[d] === 2) nb++;
-        c += 20 * nb + 1000 * Math.max(0, nb - HELP_MAX);
+        c += 20 * nb + 1000 * Math.max(0, nb - helpMax(staff[i]));
         continue;
       }
       let run = prevRun[i], last = prevLast[i], offs = 0, cA = 0, cD = 0, cB = 0, two = 0;
@@ -126,16 +136,17 @@ export function solveSync(input, onProgress, opts = {}) {
       if (bReg === 0) c += 1000;
       if (we[d]) {
         if (nW < 2) c += 1000;
-        if (nA === 0) c += 60;
+        if (nA === 0 && !opener[d]) c += 60;
         if (nW === 3 && !((nA === 1 && nD === 1) || (nA === 0 && nD === 1) || (nA === 1 && nD === 0))) c += 10;
       } else {
         if (!opener[d] && nA === 0) c += 1000;
-        if (opener[d] && aNon > 0) c += 25;
+
         if (nW === 2 && !(nD === 1 && nB === 1)) c += 6;
         if (nW === 3) c += 15;
       }
+      if (opener[d]) c += 60 * nA;
       const n = nW + pt[d], t = TG[d];
-      c += (we[d] ? 40 : 30) * Math.max(0, t - n) + 10 * Math.max(0, n - t - 1);
+      c += (we[d] ? 40 : 30) * (bz[d] ? 3 : 1) * Math.max(0, t - n) + 10 * Math.max(0, n - t - 1);
       if (n <= 2) c += 150; else if (n <= 2.5) c += 40;
     }
     return c;
@@ -247,7 +258,7 @@ export function checkViolations(input, schedule) {
       last = x;
     }
     if (m.role === 'help') {
-      if (work > HELP_MAX) v.push({ day: null, staffId: m.id, level: 'error', msg: `${nm(m)} ${work}回（月${HELP_MAX}回まで）` });
+      if (work > helpMax(m)) v.push({ day: null, staffId: m.id, level: 'error', msg: `${nm(m)} ${work}回（月${helpMax(m)}回まで）` });
       continue;
     }
     if (offs !== 8) v.push({ day: null, staffId: m.id, level: 'error', msg: `${nm(m)} 公休${offs}日（8日必要）` });
@@ -255,6 +266,48 @@ export function checkViolations(input, schedule) {
     if (d30 > 2) v.push({ day: null, staffId: m.id, level: 'error', msg: `${nm(m)} D30が${d30}回（2回まで）` });
   }
   const hc = headcount(input, schedule);
-  for (let d = 1; d <= N; d++) if (hc[d] <= 2.5) v.push({ day: d, level: 'warn', msg: `${d}日 人員数${hc[d]}` });
+  const TG = targets(input);
+  for (let d = 1; d <= N; d++) if (hc[d] <= 2.5 || hc[d] < TG[d]) v.push({ day: d, level: 'warn', msg: `${d}日 人員数${hc[d]}（目標${TG[d]}）` });
   return v;
+}
+
+export function suggestHelp(input, schedule) {
+  const N = input.month.days, hc = headcount(input, schedule), TG = targets(input), out = {};
+  const staff = input.members.filter((m) => m.kind === 'staff');
+  const cell = (id, d) => schedule.staff?.[id]?.[d] || '/';
+  const worked = (id) => { let n = 0; for (let d = 1; d <= N; d++) if (isWork(cell(id, d))) n++; return n; };
+  const left = {};
+  for (const m of staff) if (m.role === 'help') left[m.id] = helpMax(m) - worked(m.id);
+  const canWork = (m, d) => {
+    const pv = input.prev?.[m.id] || { run: 0, last: '/' };
+    const at = (k) => (k < 1 ? (k === 0 ? pv.last || '/' : '/') : k > N ? '/' : cell(m.id, k));
+    let run = 1;
+    for (let k = d - 1; k >= 0; k--) {
+      if (k === 0) { run += pv.run || 0; break; }
+      if (!isWork(cell(m.id, k))) break;
+      run++;
+    }
+    for (let k = d + 1; k <= N && isWork(cell(m.id, k)); k++) run++;
+    if (run > 5) return false;
+    const pb = at(d - 1)[0] === 'B', na = at(d + 1)[0] === 'A';
+    return !(pb && na) || (!pb && !na);
+  };
+  for (let d = 1; d <= N; d++) {
+    if (hc[d] >= TG[d]) continue;
+    const L = [];
+    for (const m of staff) {
+      if (m.role !== 'help' || left[m.id] <= 0 || isWork(cell(m.id, d)) || input.staffEvents?.[m.id]?.[d]) continue;
+      L.push({ memberId: m.id, name: m.name, reason: `応援（残り${left[m.id]}回）` });
+    }
+    for (const m of input.members) {
+      if (m.kind !== 'part' || input.partRequests?.[m.id]?.[d] || schedule.part?.[m.id]?.[d]) continue;
+      L.push({ memberId: m.id, name: m.name, reason: '希望外・要相談' });
+    }
+    for (const m of staff) {
+      if (m.role === 'help' || cell(m.id, d) !== '/' || !canWork(m, d)) continue;
+      L.push({ memberId: m.id, name: m.name, reason: '公休を出勤に変更' });
+    }
+    out[d] = L;
+  }
+  return out;
 }

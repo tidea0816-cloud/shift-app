@@ -15,6 +15,7 @@ const EV = ['', '×', 'リ', '有', 'MUST'];
 const EVL = { '': '', '×': '×', 'リ': 'リ', '有': '有', MUST: 'MT' };
 const KINDS = [['×', '希望休(×)'], ['リ', 'リフ休(リ)'], ['有', '有給(有)'], ['MUST', '出勤マスト'], ['無視', '無視']];
 const DOW = '日月火水木金土';
+const BUSY_RE = /セール|フェア|祭|初売|福袋|催事|イベント/;
 
 const DEFAULT_MEMBERS = [
   { id: 'kotani', name: '社員1', kind: 'staff', role: 'B' },
@@ -45,14 +46,14 @@ function fresh() {
   const d = new Date();
   let y = d.getFullYear(), m = d.getMonth() + 2;
   if (m > 12) { m -= 12; y++; }
-  return { step: 0, year: y, month: m, members: DEFAULT_MEMBERS.map(x => ({ ...x })), partReq: {}, staffEvents: {}, prev: {}, schedule: null, colorMap: {} };
+  return { step: 0, year: y, month: m, members: DEFAULT_MEMBERS.map(x => ({ ...x })), partReq: {}, staffEvents: {}, events: {}, partOff: {}, partDef: {}, prev: {}, schedule: null, colorMap: {} };
 }
 function load() {
   try { const j = JSON.parse(localStorage.getItem(KEY)); if (j && Array.isArray(j.members)) return { ...fresh(), ...j }; } catch { }
   return fresh();
 }
 const S = load();
-const T = { cal: null, pending: [], busy: {}, notes: {}, raw: {}, viol: null, head: null, gen: false, err: '', sheet: null, file: null, msg: '', sv: null };
+const T = { help: null, cal: null, pending: [], busy: {}, notes: {}, raw: {}, viol: null, head: null, gen: false, err: '', sheet: null, file: null, msg: '', sv: null };
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch { } };
 
 let _m = null;
@@ -87,7 +88,10 @@ function v1(m) {
     <input type="text" class="grow" data-act="mname" data-id="${x.id}" value="${esc(x.name)}" aria-label="名前">
     <button class="sm" data-act="mup" data-id="${x.id}" aria-label="上へ">▲</button><button class="sm" data-act="mdown" data-id="${x.id}" aria-label="下へ">▼</button><button class="sm danger" data-act="mdel" data-id="${x.id}" aria-label="削除">✕</button></div>
     <div class="row" style="margin-top:6px"><select data-act="mkind" data-id="${x.id}"><option value="staff"${x.kind === 'staff' ? ' selected' : ''}>社員</option><option value="part"${x.kind === 'part' ? ' selected' : ''}>バイト</option></select>
-    ${x.kind === 'staff' ? `<select data-act="mrole" data-id="${x.id}">${Object.entries(ROLE).map(([k, v]) => `<option value="${k}"${x.role === k ? ' selected' : ''}>${v}</option>`).join('')}</select>` : ''}</div></div>`).join('');
+    ${x.kind === 'staff' ? `<select data-act="mrole" data-id="${x.id}">${Object.entries(ROLE).map(([k, v]) => `<option value="${k}"${x.role === k ? ' selected' : ''}>${v}</option>`).join('')}</select>` : ''}
+    ${x.kind === 'staff' && x.role === 'help' ? `<label class="row" style="gap:4px">月上限<input type="number" inputmode="numeric" min="0" max="31" style="width:64px" value="${x.maxPerMonth ?? 3}" data-act="mmax" data-id="${x.id}">回</label>` : ''}</div>
+    ${x.kind === 'part' ? `<div class="row" style="margin-top:6px"><span class="mut">定番</span><input type="time" step="900" value="${fmtT(x.defaultStart)}" data-act="mdst" data-id="${x.id}" aria-label="定番の開始">〜<input type="time" step="900" value="${fmtT(x.defaultEnd)}" data-act="mden" data-id="${x.id}" aria-label="定番の終了">
+      <select data-act="mdd" data-id="${x.id}"><option value="weekday"${(x.defaultDays || 'weekday') === 'weekday' ? ' selected' : ''}>平日のみ</option><option value="all"${x.defaultDays === 'all' ? ' selected' : ''}>毎日</option></select></div>` : ''}</div>`).join('');
   return `<section class="card"><h2>対象月</h2><div class="row">
     <select data-act="year">${yrs.map(y => `<option${y === S.year ? ' selected' : ''}>${y}</option>`).join('')}</select>年
     <select data-act="month">${[...Array(12)].map((_, i) => `<option${i + 1 === S.month ? ' selected' : ''}>${i + 1}</option>`).join('')}</select>月
@@ -166,25 +170,27 @@ function v2() {
 }
 
 /* ---------- ③ ---------- */
-function grid(m, rowsHtml) {
-  const head = [...Array(m.days)].map((_, i) => { const d = i + 1; return `<th class="${m.weekendOrHoliday.has(d) ? 'we' : ''}${m.dow[d] === 6 && !m.holidays.has(d) ? ' sat' : ''}">${d}<small>${DOW[m.dow[d]]}</small></th>`; }).join('');
+function grid(m, rowsHtml, marks) {
+  const head = [...Array(m.days)].map((_, i) => { const d = i + 1; const mk = marks && (S.events[d] || []).length ? `<i class="evm" title="${esc(S.events[d].map(e => e.text).join('・'))}">●</i>` : '';
+    return `<th class="${m.weekendOrHoliday.has(d) ? 'we' : ''}${m.dow[d] === 6 && !m.holidays.has(d) ? ' sat' : ''}">${d}${mk}<small>${DOW[m.dow[d]]}</small></th>`; }).join('');
   return `<div class="tbl-wrap"><table class="g"><tr><th class="nm"></th>${head}</tr>${rowsHtml}</table></div>`;
 }
 function v3(m) {
   const cal = T.cal;
   const colors = cal ? cal.colors.map(c => {
     const to = S.colorMap[c.key]?.to;
-    return `<div class="card"><div class="row"><span class="sw" style="background:${esc(c.hex)}"></span><b>この色はどの社員ですか？</b></div><div class="btns">
-      ${staff().map(s => `<button class="${to === s.id ? 'sel' : ''}" data-act="cmap" data-key="${esc(c.key)}" data-hex="${esc(c.hex)}" data-to="${s.id}">${esc(famName(s.name))}</button>`).join('')}
+    return `<div class="card"><div class="row"><span class="sw" style="background:${esc(c.hex)}"></span><b>この色は誰ですか？</b></div><div class="btns">
+       ${S.members.map(s => `<button class="${to === s.id ? 'sel' : ''}" data-act="cmap" data-key="${esc(c.key)}" data-hex="${esc(c.hex)}" data-to="${s.id}">${esc(famName(s.name))}</button>`).join('')}
       <button class="${to === 'event' ? 'sel' : ''}" data-act="cmap" data-key="${esc(c.key)}" data-hex="${esc(c.hex)}" data-to="event">店のイベント（対象外）</button></div></div>`;
   }).join('') : '';
   const bars = cal ? cal.bars.map((b, i) => {
     const to = S.colorMap[b.colorKey]?.to;
-    if (!to || to === 'event') return '';
+    if (!to) return '';
     const hex = cal.colors.find(c => c.key === b.colorKey)?.hex || '#ccc';
-    return `<div class="card bar"><div class="row"><span class="sw" style="background:${esc(hex)}"></span><b>${esc(famName(byId(to)?.name || '?'))}</b><span class="mut">${ranges(b.days)}</span></div>
-      ${b.kind === 'text' ? `<img src="${esc(b.cropDataUrl)}" alt="帯"><div class="mut">読み取り：${b.text == null ? '読み取り中…' : esc(b.text) || '（なし）'}</div>` : ''}
-      <div class="btns">${KINDS.map(([k, l]) => `<button class="${b.choice === k ? 'sel' : ''}" data-act="bchoice" data-i="${i}" data-k="${k}">${l}</button>`).join('')}</div></div>`;
+    const nm = to === 'event' ? '店のイベント' : famName(byId(to)?.name || '?'), isP = byId(to)?.kind === 'part';
+    return `<div class="card bar"><div class="row"><span class="sw" style="background:${esc(hex)}"></span><b>${esc(nm)}</b><span class="mut">${ranges(b.days)}</span></div>
+      ${b.kind === 'text' ? `<img src="${esc(b.cropDataUrl)}" alt="帯"><div class="row" style="margin-top:4px"><span class="mut">文字</span><input type="text" class="grow" value="${b.text == null ? '' : esc(b.text)}" placeholder="${b.text == null ? '読み取り中…' : '（なし）'}" data-act="btext" data-i="${i}" aria-label="帯の文字"></div>` : ''}
+      ${isP ? `<p class="mut">${b.kind === 'x' ? '×の日は入りません' : '文字の帯は無視します'}。それ以外の日は定番時間で入ります。</p>` : to === 'event' ? (b.kind === 'x' ? '<p class="mut">×の帯は対象外</p>' : '') : `<div class="btns">${KINDS.map(([k, l]) => `<button class="${b.choice === k ? 'sel' : ''}" data-act="bchoice" data-i="${i}" data-k="${k}">${l}</button>`).join('')}</div>`}</div>`;
   }).join('') : '';
   const rows = staff().map(s => `<tr><td class="nm">${esc(famName(s.name))}</td>${[...Array(m.days)].map((_, i) => {
     const d = i + 1, v = S.staffEvents[s.id]?.[d] || '';
@@ -195,7 +201,22 @@ function v3(m) {
     <p class="mut">帯の色から社員を判定します。答えた色は保存され、次回から自動で当てはまります。</p></section>
     ${colors}${bars}
     ${cal && bars ? '<div class="card"><button class="pri" data-act="bapply" style="width:100%">読み取り結果を下の表に反映</button></div>' : ''}
-    <section class="card"><h2>日付 × 社員</h2><p class="mut">セルをタップで切り替え：なし→×→リ→有→MT（出勤マスト）</p>${grid(m, rows)}</section>`;
+    <section class="card"><h2>日付 × 社員</h2><p class="mut">セルをタップで切り替え：なし→×→リ→有→MT（出勤マスト）</p>${grid(m, rows, true)}</section>
+    ${evSection(m)}`;
+}
+const evDefault = t => BUSY_RE.test(t || '');
+const evFlat = () => { const o = {}; for (const [d, a] of Object.entries(S.events)) if (a.length) o[d] = a.map(({ src, bset, ...e }) => e); return o; };
+function evSection(m) {
+  const rows = Object.keys(S.events).map(Number).sort((a, b) => a - b).flatMap(d => S.events[d].map((e, i) => `<div class="erow"><span>${d}日</span>
+    <input type="text" class="grow" value="${esc(e.text)}" data-act="evtext" data-day="${d}" data-i="${i}" aria-label="イベント名">
+    <span class="mut">${e.kind === 'staff' ? esc(famName(byId(e.staffId)?.name || '社員')) : '店'}</span>
+    <button class="sm ${e.busy ? 'sel' : ''}" data-act="evbusy" data-day="${d}" data-i="${i}">繁忙${e.busy ? '○' : '×'}</button>
+    <button class="sm danger" data-act="evdel" data-day="${d}" data-i="${i}" aria-label="削除">✕</button></div>`)).join('') || '<p class="mut">まだありません</p>';
+  return `<section class="card"><h2>イベント</h2><p class="mut">店のイベントは繁忙にすると目標人数が+1。繁忙は文字（セール・フェア等）から自動判定、タップで切り替え。</p>${rows}
+    <div class="row" style="margin-top:8px"><input type="number" inputmode="numeric" min="1" max="${m.days}" placeholder="日" style="width:64px" id="evNewDay">
+    <input type="text" class="grow" placeholder="イベント名" id="evNewText">
+    <select id="evNewKind"><option value="store">店・ビル</option>${staff().map(s => `<option value="staff:${s.id}">${esc(famName(s.name))}</option>`).join('')}</select>
+    <button class="pri" data-act="evadd">追加</button></div></section>`;
 }
 async function readCalendars(files) {
   T.busy.cal = true; T.err = ''; render();
@@ -241,9 +262,16 @@ function v4() {
 /* ---------- ⑤ ---------- */
 function fullPrev() { const o = {}; for (const s of staff()) o[s.id] = S.prev[s.id] || { run: 0, last: '/' }; return o; }
 function solveInput() {
-  const pr = {}; for (const p of parts()) pr[p.id] = S.partReq[p.id] || {};
+  const m = mon(), pr = {};
+  for (const p of parts()) {
+    const q = { ...(S.partReq[p.id] || {}) };
+    if (S.partDef[p.id] && p.defaultStart != null && p.defaultEnd != null)
+      for (let d = 1; d <= m.days; d++)
+        if (!q[d] && !S.partOff[p.id]?.[d] && (p.defaultDays === 'all' || !m.weekendOrHoliday.has(d))) q[d] = { start: p.defaultStart, end: p.defaultEnd };
+    pr[p.id] = q;
+  }
   const ev = {}; for (const s of staff()) ev[s.id] = Object.fromEntries(Object.entries(S.staffEvents[s.id] || {}).filter(([, v]) => v));
-  return { month: mon(), members: S.members, partRequests: pr, staffEvents: ev, prev: fullPrev(), locked: S.schedule?.locked || {} };
+  return { month: mon(), members: S.members, partRequests: pr, staffEvents: ev, events: evFlat(), prev: fullPrev(), locked: S.schedule?.locked || {} };
 }
 async function refreshCheck() {
   if (!S.schedule) return;
@@ -252,6 +280,7 @@ async function refreshCheck() {
     const inp = solveInput();
     T.viol = T.sv.checkViolations(inp, S.schedule) || [];
     T.head = T.sv.headcount(inp, S.schedule) || {};
+    try { T.help = T.sv.suggestHelp ? T.sv.suggestHelp(inp, S.schedule) || {} : {}; } catch { T.help = {}; }
   } catch (e) { T.viol = []; T.head = {}; T.err = String(e.message || e); }
   if (S.step === 4) render();
 }
@@ -262,7 +291,7 @@ async function gen() {
     const inp = solveInput();
     const sch = await T.sv.solve(inp, p => { const e = $('#genbar'); if (e) e.style.width = Math.round(p * 100) + '%'; const t = $('#genpct'); if (t) t.textContent = Math.round(p * 100) + '%'; });
     sch.locked = { ...(inp.locked || {}) };
-    S.schedule = sch;
+    S.schedule = sch; T.help = null;
   } catch (e) { T.err = '生成に失敗しました：' + (e.message || e); }
   T.gen = false; T.viol = null; render();
 }
@@ -282,8 +311,13 @@ function v5(m) {
     }).join('')}</tr>`).join('') +
     `<tr><td class="nm">人数</td>${[...Array(m.days)].map((_, i) => { const h = T.head?.[i + 1]; return `<td class="${h != null && h <= 2.5 ? 'low' : ''}">${h ?? ''}</td>`; }).join('')}</tr>`;
   const viol = T.viol ? (T.viol.length ? T.viol.map(v => `<div class="viol ${v.level}"><b>${v.level === 'error' ? '違反' : '注意'}</b> ${v.day ? v.day + '日 ' : ''}${v.staffId ? esc(famName(byId(v.staffId)?.name || '')) + ' ' : ''}${esc(v.msg)}</div>`).join('') : '<p class="ok">ルール違反はありません</p>') : '<p class="mut">チェック中…</p>';
-  return `${bt}<section class="card"><h2>シフト表</h2><p class="mut">社員のセルをタップで記号を変更（枠線＝固定）。人数が2.5以下の日は赤。</p>${grid(m, rows)}</section>
+  return `${bt}<section class="card"><h2>シフト表</h2><p class="mut">社員のセルをタップで記号を変更（枠線＝固定）。人数が2.5以下の日は赤。</p>${grid(m, rows, true)}</section>
+    ${helpCard()}
     <section class="card"><h2>違反・注意</h2>${viol}</section>`;
+}
+function helpCard() {
+  const h = T.help || {}, days = Object.keys(h).map(Number).filter(d => h[d]?.length).sort((a, b) => a - b);
+  return `<section class="card"><h2>応援候補</h2>${days.length ? days.map(d => `<div class="viol warn"><b>${d}日（${DOW[mon().dow[d]]}）</b> ${h[d].map(x => `${esc(x.name)}<span class="mut">（${esc(x.reason)}）</span>`).join('、')}</div>`).join('') : '<p class="mut">人員が足りない日はありません</p>'}</section>`;
 }
 function renderSheet() {
   const el = $('#sheet');
@@ -312,8 +346,9 @@ function v6() {
 async function build() {
   T.busy.x = true; T.msg = ''; T.file = null; render();
   try {
+    if (!T.help) await refreshCheck();
     const X = await lib.xlsx();
-    const blob = await X.buildXlsx({ month: mon(), members: S.members, schedule: S.schedule, mustDays: mustDays(), templateUrl: 'template.xlsx' });
+    const blob = await X.buildXlsx({ month: mon(), members: S.members, schedule: S.schedule, mustDays: mustDays(), events: evFlat(), help: T.help || {}, templateUrl: 'template.xlsx' });
     T.file = new File([blob], fname(), { type: blob.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     T.msg = `作成しました（${Math.round(T.file.size / 1024)}KB）`;
   } catch (e) { T.msg = 'エラー：' + (e.message || e); }
@@ -331,8 +366,8 @@ async function share() {
 }
 
 /* ---------- events ---------- */
-function clearMonthData() { S.partReq = {}; S.staffEvents = {}; S.prev = {}; S.schedule = null; T.cal = null; T.viol = null; T.head = null; T.notes = {}; T.raw = {}; T.pending = []; T.file = null; }
-const hasData = () => Object.keys(S.partReq).length || Object.keys(S.staffEvents).length || S.schedule;
+function clearMonthData() { S.partReq = {}; S.staffEvents = {}; S.events = {}; S.partOff = {}; S.partDef = {}; T.help = null; S.prev = {}; S.schedule = null; T.cal = null; T.viol = null; T.head = null; T.notes = {}; T.raw = {}; T.pending = []; T.file = null; }
+const hasData = () => Object.keys(S.partReq).length || Object.keys(S.events).length || Object.keys(S.staffEvents).length || S.schedule;
 function swapMember(id, dir) {
   const i = S.members.findIndex(m => m.id === id), k = S.members[i].kind;
   let j = i + dir; while (S.members[j] && S.members[j].kind !== k) j += dir;
@@ -358,7 +393,7 @@ function act(el) {
     case 'mdel': {
       if (!confirm(`${byId(id).name} を削除しますか？`)) return;
       S.members = S.members.filter(m => m.id !== id);
-      delete S.partReq[id]; delete S.staffEvents[id]; delete S.prev[id];
+      delete S.partReq[id]; delete S.staffEvents[id]; delete S.prev[id]; delete S.partOff[id]; delete S.partDef[id];
       if (S.schedule) { S.schedule = null; T.viol = null; }
       break;
     }
@@ -386,14 +421,38 @@ function act(el) {
     case 'cmap': S.colorMap[d.key] = { hex: d.hex, to: d.to }; break;
     case 'bchoice': T.cal.bars[+d.i].choice = d.k; break;
     case 'bapply': {
+      for (const d of Object.keys(S.events)) { S.events[d] = S.events[d].filter(e => e.src !== 'cal'); if (!S.events[d].length) delete S.events[d]; }
+      const addEv = (day, e) => { const a = (S.events[day] ||= []); if (!a.some(x => x.text === e.text && x.kind === e.kind && x.staffId === e.staffId)) a.push({ ...e, src: 'cal' }); };
       for (const b of T.cal.bars) {
-        const to = S.colorMap[b.colorKey]?.to;
-        if (!to || to === 'event' || !b.choice || b.choice === '無視') continue;
-        const ev = (S.staffEvents[to] ||= {});
-        for (const x of b.days) ev[x] = b.choice;
+        const to = S.colorMap[b.colorKey]?.to, mem = byId(to), text = (b.text || '').trim();
+        if (!to) continue;
+        if (mem?.kind === 'part') {
+          S.partDef[to] = true;
+          if (b.kind === 'x') { const o = (S.partOff[to] ||= {}); for (const x of b.days) o[x] = true; }
+        } else if (to === 'event') {
+          if (b.kind === 'text' && text) for (const x of b.days) addEv(x, { text, kind: 'store', busy: evDefault(text) });
+        } else if (mem && b.choice && b.choice !== '無視') {
+          const ev = (S.staffEvents[to] ||= {}); for (const x of b.days) ev[x] = b.choice;
+          if (b.kind === 'text' && text) for (const x of b.days) addEv(x, { text, kind: 'staff', staffId: to, busy: false });
+        }
       }
       break;
     }
+    case 'btext': T.cal.bars[+d.i].text = v; return;
+    case 'evtext': { const e = S.events[day][+d.i]; e.text = v.trim(); if (!e.bset && e.kind === 'store') e.busy = evDefault(e.text); delete e.src; break; }
+    case 'evbusy': { const e = S.events[day][+d.i]; e.busy = !e.busy; e.bset = true; break; }
+    case 'evdel': S.events[day].splice(+d.i, 1); if (!S.events[day].length) delete S.events[day]; break;
+    case 'evadd': {
+      const dd = parseInt($('#evNewDay').value), tx = $('#evNewText').value.trim(), k = $('#evNewKind').value;
+      if (!(dd >= 1 && dd <= mon().days) || !tx) return;
+      const [kind, sid] = k.split(':');
+      (S.events[dd] ||= []).push({ text: tx, kind, ...(sid ? { staffId: sid } : {}), busy: kind === 'store' && evDefault(tx) });
+      break;
+    }
+    case 'mmax': byId(id).maxPerMonth = Math.max(0, parseInt(v) || 0); break;
+    case 'mdst': { const m = byId(id); m.defaultStart = parseT(v); if (m.defaultStart == null) delete m.defaultStart; break; }
+    case 'mden': { const m = byId(id); m.defaultEnd = parseT(v); if (m.defaultEnd == null) delete m.defaultEnd; break; }
+    case 'mdd': byId(id).defaultDays = v; break;
     case 'evc': {
       const ev = (S.staffEvents[id] ||= {}), cur = ev[day] || '';
       const nx = EV[(EV.indexOf(cur) + 1) % EV.length];
